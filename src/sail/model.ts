@@ -1,5 +1,14 @@
 import type { SailControls, SailShape } from './types'
 
+/** Visual-only luff/stall knobs (from sailVisualMotion in forces.ts). */
+export type SailVisualMotion = {
+  camberScale: number
+  flutterAmp: number
+  flutterHz: number
+  chordBias: number
+  badness: number
+}
+
 const MAST_HEIGHT = 4.2
 const BOOM_LENGTH = 2.4
 const DECK_Y = 0.55
@@ -82,17 +91,21 @@ export function deriveShape(controls: SailControls): SailShape {
  * - u: luff → leech at each height (chord shrinks toward the head)
  *
  * Foot (v=0) lies on the boom. Camber offsets leeward of the chord.
+ * Pass `out` to reuse a buffer (animation path).
  */
 export function computeSailPositions(
   shape: SailShape,
   segmentsU: number,
   segmentsV: number,
+  out?: Float32Array,
+  camberScale = 1,
 ): Float32Array {
   const count = (segmentsU + 1) * (segmentsV + 1)
-  const positions = new Float32Array(count * 3)
+  const positions = out ?? new Float32Array(count * 3)
   const headY = shape.mastHeight
   const footY = shape.boomElevation
   const sailSpan = headY - footY
+  const draftScale = clamp(camberScale, 0.25, 1.15)
 
   let idx = 0
   for (let j = 0; j <= segmentsV; j++) {
@@ -107,7 +120,8 @@ export function computeSailPositions(
       const u = i / segmentsU
       const along = u * chord
 
-      const camber = camberFraction(u, shape.draftPosition) * shape.draftDepth * chord
+      const camber =
+        camberFraction(u, shape.draftPosition) * shape.draftDepth * chord * draftScale
       const lowerBias = 1 + (1 - v) * 0.45
       const offset = camber * lowerBias
 
@@ -126,6 +140,90 @@ export function computeSailPositions(
   }
 
   return positions
+}
+
+/**
+ * Educational luff/stall motion on top of the parametric sail.
+ * Always call after (or via) a fresh base shape write — does not change force math.
+ *
+ * Undertrimmed: flutter weighted to the luff (leading edge soft).
+ * Oversheeted: larger flop / collapse weighted to the leech.
+ */
+export function applySailLuffFlutter(
+  positions: Float32Array,
+  shape: SailShape,
+  motion: SailVisualMotion,
+  time: number,
+  segmentsU: number,
+  segmentsV: number,
+): void {
+  if (motion.flutterAmp < 0.002 && motion.badness <= 0) return
+
+  // When halyard scallop is already visible, ease off extra luff flutter.
+  const scallopGuard = 1 - clamp(shape.luffScallop, 0, 1) * 0.62
+  const t = time
+
+  for (let j = 0; j <= segmentsV; j++) {
+    const v = j / segmentsV
+    const twistHere = shape.twistDeg * v
+    const dir = boomDirection(shape.boomAngleDeg, twistHere)
+    const perp = boomLeewardNormal(dir)
+    // Foot stays on the boom; head freer.
+    const spanFree = Math.pow(v, 0.65) * (0.35 + 0.65 * Math.sin(v * Math.PI))
+
+    for (let i = 0; i <= segmentsU; i++) {
+      const u = i / segmentsU
+      const idx = (j * (segmentsU + 1) + i) * 3
+
+      // Chord envelope: bias 0 → luff, 1 → leech.
+      const luffW = Math.exp(-u * 3.8) * (0.35 + 0.65 * (1 - u))
+      const leechW = Math.pow(u, 1.35) * (0.4 + 0.6 * u)
+      const chordW = luffW * (1 - motion.chordBias) + leechW * motion.chordBias
+      const luffOnly = Math.exp(-u * 4.2)
+      const flutterScale =
+        chordW * (0.55 + 0.45 * scallopGuard + 0.45 * (1 - luffOnly * shape.luffScallop))
+
+      const phase =
+        t * motion.flutterHz * Math.PI * 2 +
+        v * (3.2 + motion.chordBias * 2.4) +
+        u * (1.1 + motion.chordBias * 3.5)
+      const primary = Math.sin(phase)
+      const secondary = Math.sin(phase * 1.73 + v * 2.1)
+      const flap = primary * 0.72 + secondary * 0.28
+
+      // Overtrim: slight inward camber collapse pulse on the aft sail.
+      const collapse =
+        motion.chordBias > 0.55
+          ? -motion.badness * 0.045 * Math.pow(u, 1.2) * (0.55 + 0.45 * Math.sin(phase * 0.5))
+          : 0
+      // Undertrim: soft leading-edge shiver (mostly lateral).
+      const shiver =
+        motion.chordBias < 0.35
+          ? motion.badness * 0.02 * luffW * Math.sin(phase * 2.15 + v * 5.5)
+          : 0
+
+      const amp = motion.flutterAmp * flutterScale * spanFree
+      const lateral = amp * flap + collapse * shape.boomLength + shiver
+
+      positions[idx]! += lateral * perp.x
+      positions[idx + 1]! +=
+        amp * 0.12 * secondary * spanFree * (0.3 + motion.chordBias * 0.7)
+      positions[idx + 2]! += lateral * perp.z
+    }
+  }
+}
+
+/** Fresh base shape (with camber dump) + procedural flutter into `out`. */
+export function writeSailVisualPositions(
+  out: Float32Array,
+  shape: SailShape,
+  motion: SailVisualMotion,
+  time: number,
+  segmentsU: number,
+  segmentsV: number,
+): void {
+  computeSailPositions(shape, segmentsU, segmentsV, out, motion.camberScale)
+  applySailLuffFlutter(out, shape, motion, time, segmentsU, segmentsV)
 }
 
 /** Boom tip (clew attachment) in world space. */

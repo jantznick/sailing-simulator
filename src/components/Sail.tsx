@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import { useFrame } from '@react-three/fiber'
 import {
   BufferAttribute,
   BufferGeometry,
@@ -6,8 +7,8 @@ import {
   DoubleSide,
   type Mesh,
 } from 'three'
-import type { SailForces } from '../sail/forces'
-import { computeSailPositions } from '../sail/model'
+import { sailVisualMotion, type SailForces } from '../sail/forces'
+import { writeSailVisualPositions } from '../sail/model'
 import type { ControlKey, SailShape } from '../sail/types'
 import { SAIL_SEGMENTS_U, SAIL_SEGMENTS_V } from '../sail/types'
 
@@ -17,13 +18,32 @@ type SailProps = {
   activeControl: ControlKey | null
 }
 
+/**
+ * Parametric sail mesh with educational luff/stall flutter.
+ * Base shape always comes from deriveShape via computeSailPositions;
+ * motion is visual-only (forces/coaching stay on the rigid shape).
+ */
 export function Sail({ shape, forces, activeControl }: SailProps) {
   const meshRef = useRef<Mesh>(null)
+  const shapeRef = useRef(shape)
+  const forcesRef = useRef(forces)
+  shapeRef.current = shape
+  forcesRef.current = forces
+
   const baseColor = useMemo(() => flowTint(forces), [forces])
 
   const geometry = useMemo(() => {
     const geo = new BufferGeometry()
-    const positions = computeSailPositions(shape, SAIL_SEGMENTS_U, SAIL_SEGMENTS_V)
+    const count = (SAIL_SEGMENTS_U + 1) * (SAIL_SEGMENTS_V + 1)
+    const positions = new Float32Array(count * 3)
+    writeSailVisualPositions(
+      positions,
+      shape,
+      sailVisualMotion(forces),
+      0,
+      SAIL_SEGMENTS_U,
+      SAIL_SEGMENTS_V,
+    )
     const colors = buildVertexColors(forces, SAIL_SEGMENTS_U, SAIL_SEGMENTS_V, activeControl)
     geo.setAttribute('position', new BufferAttribute(positions, 3))
     geo.setAttribute('color', new BufferAttribute(colors, 3))
@@ -36,16 +56,27 @@ export function Sail({ shape, forces, activeControl }: SailProps) {
   useEffect(() => () => geometry.dispose(), [geometry])
 
   useLayoutEffect(() => {
-    const pos = geometry.getAttribute('position') as BufferAttribute
     const col = geometry.getAttribute('color') as BufferAttribute
-    const next = computeSailPositions(shape, SAIL_SEGMENTS_U, SAIL_SEGMENTS_V)
     const colors = buildVertexColors(forces, SAIL_SEGMENTS_U, SAIL_SEGMENTS_V, activeControl)
-    ;(pos.array as Float32Array).set(next)
     ;(col.array as Float32Array).set(colors)
-    pos.needsUpdate = true
     col.needsUpdate = true
+  }, [geometry, forces, activeControl])
+
+  useFrame(({ clock }) => {
+    const pos = geometry.getAttribute('position') as BufferAttribute
+    const arr = pos.array as Float32Array
+    const motion = sailVisualMotion(forcesRef.current)
+    writeSailVisualPositions(
+      arr,
+      shapeRef.current,
+      motion,
+      clock.elapsedTime,
+      SAIL_SEGMENTS_U,
+      SAIL_SEGMENTS_V,
+    )
+    pos.needsUpdate = true
     geometry.computeVertexNormals()
-  }, [geometry, shape, forces, activeControl])
+  })
 
   return (
     <mesh ref={meshRef} geometry={geometry} castShadow receiveShadow>
@@ -63,7 +94,9 @@ export function Sail({ shape, forces, activeControl }: SailProps) {
 }
 
 function flowTint(forces: SailForces): string {
-  if (forces.flow === 'stalled') return '#f0d0c4'
+  if (forces.flow === 'stalled') {
+    return forces.trimMode === 'undertrimmed' ? '#f2d8c8' : '#f0d0c4'
+  }
   if (forces.flow === 'marginal') return '#f0e6c8'
   return '#eef3f0'
 }
@@ -78,19 +111,35 @@ function buildVertexColors(
   const colors = new Float32Array(count * 3)
   const c = new Color()
   const hot = new Color(
-    forces.flow === 'stalled' ? '#e07058' : forces.flow === 'marginal' ? '#d4b85a' : '#4ec4a8',
+    forces.flow === 'stalled'
+      ? forces.trimMode === 'undertrimmed'
+        ? '#e08858'
+        : '#e07058'
+      : forces.flow === 'marginal'
+        ? '#d4b85a'
+        : '#4ec4a8',
   )
   const cool = new Color('#f2efe6')
   const accent = new Color('#ffe08a')
   const highlightLuff = active === 'halyard'
   const highlightFoot = active === 'outhaul'
 
+  // Emphasize the failing edge slightly in the tint.
+  const edgeBias =
+    forces.flow === 'attached'
+      ? 0.4
+      : forces.trimMode === 'undertrimmed'
+        ? 0.18
+        : forces.trimMode === 'overtrimmed'
+          ? 0.72
+          : 0.4
+
   let idx = 0
   for (let j = 0; j <= segV; j++) {
     const v = j / segV
     for (let i = 0; i <= segU; i++) {
       const u = i / segU
-      const draftBand = 1 - Math.abs(u - 0.4) * 1.6
+      const draftBand = 1 - Math.abs(u - edgeBias) * 1.55
       const spanBand = 0.55 + (1 - v) * 0.45
       const t = clamp(forces.intensity * draftBand * spanBand, 0, 1)
       c.copy(cool).lerp(hot, t * 0.85)

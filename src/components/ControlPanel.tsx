@@ -70,7 +70,7 @@ export function ControlPanel({
             <Stat metric="aoa" value={`${forces.aoaDeg.toFixed(0)}°`} />
             <div className="perf-stat">
               <LabelWithTip metric="flow" />
-              <span className={flowClass}>{flowLabel(forces.flow)}</span>
+              <span className={flowClass}>{flowLabel(forces.flow, forces.trimMode)}</span>
             </div>
           </div>
         </section>

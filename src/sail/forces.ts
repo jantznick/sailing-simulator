@@ -1,7 +1,16 @@
-import { boomAngleRad, boomDirection } from './model'
+import {
+  boomAngleRad,
+  boomDirection,
+  type SailVisualMotion,
+} from './model'
 import { windSpeedKnots, type SailControls, type SailShape } from './types'
 
+export type { SailVisualMotion }
+
 export type FlowQuality = 'attached' | 'marginal' | 'stalled'
+
+/** Educational trim diagnosis for motion/copy (separate from flow quality). */
+export type TrimMode = 'ok' | 'undertrimmed' | 'overtrimmed'
 
 export type SailForces = {
   /** Apparent wind angle off the bow (degrees) */
@@ -12,6 +21,13 @@ export type SailForces = {
   aoaDeg: number
   /** Ideal AoA for current draft (degrees) */
   idealAoaDeg: number
+  /**
+   * Signed AoA error in degrees: negative = too little angle (undertrimmed / luffing),
+   * positive = too much angle (oversheeted stall).
+   */
+  aoaError: number
+  /** Whether the sail is under- or over-trimmed relative to ideal AoA */
+  trimMode: TrimMode
   /** Relative forward drive 0–1 */
   drive: number
   /** Relative heeling force 0–1 */
@@ -106,6 +122,14 @@ export function deriveForces(shape: SailShape, controls: SailControls): SailForc
   else if (aoaAbs < 7 || aoaError > 10 || shape.luffScallop > 0.45) flow = 'marginal'
   if (windKnots < 3 && flow === 'attached') flow = 'marginal'
 
+  // Under = classic luff (too little AoA / soft entry); over = overloaded / oversheeted.
+  let trimMode: TrimMode = 'ok'
+  if (aoaError < -2.5 || aoaAbs < idealAoaDeg * 0.55 || (shape.luffScallop > 0.55 && aoaError <= 4)) {
+    trimMode = 'undertrimmed'
+  } else if (aoaError > 2.5) {
+    trimMode = 'overtrimmed'
+  }
+
   const driveN = clamp(drive, 0, 1)
   const heelN = clamp(heeling, 0, 1)
   const dragN = clamp((cd * Math.sqrt(q)) / 1.25, 0, 1)
@@ -128,6 +152,8 @@ export function deriveForces(shape: SailShape, controls: SailControls): SailForc
     windKnots,
     aoaDeg: aoaAbs,
     idealAoaDeg,
+    aoaError,
+    trimMode,
     drive: driveN,
     heeling: heelN,
     drag: dragN,
@@ -138,15 +164,51 @@ export function deriveForces(shape: SailShape, controls: SailControls): SailForc
   }
 }
 
-export function flowLabel(flow: FlowQuality): string {
-  switch (flow) {
-    case 'attached':
-      return 'Attached'
-    case 'marginal':
-      return 'Marginal'
-    case 'stalled':
-      return 'Stalled / luffing'
+export function flowLabel(flow: FlowQuality, trimMode: TrimMode = 'ok'): string {
+  if (flow === 'attached') return 'Attached'
+  if (flow === 'marginal') {
+    if (trimMode === 'undertrimmed') return 'Near luffing'
+    if (trimMode === 'overtrimmed') return 'Near stall'
+    return 'Marginal'
   }
+  if (trimMode === 'undertrimmed') return 'Luffing'
+  if (trimMode === 'overtrimmed') return 'Stalled (oversheeted)'
+  return 'Stalled / luffing'
+}
+
+/** Visual motion knobs for educational luff/stall (not used by force math). */
+export function sailVisualMotion(forces: SailForces): SailVisualMotion {
+  const wind01 = clamp(forces.windKnots / 18, 0.15, 1.2)
+  const err = Math.abs(forces.aoaError)
+  const badness =
+    forces.flow === 'stalled'
+      ? clamp(0.55 + err / 40 + forces.intensity * 0.25, 0.55, 1)
+      : forces.flow === 'marginal'
+        ? clamp(0.22 + err / 55 + forces.intensity * 0.15, 0.18, 0.55)
+        : 0
+
+  const camberScale =
+    forces.flow === 'attached'
+      ? 1
+      : forces.flow === 'marginal'
+        ? clamp(1 - badness * 0.28, 0.78, 0.95)
+        : clamp(1 - badness * 0.55, 0.42, 0.72)
+
+  const flutterAmp =
+    forces.flow === 'attached'
+      ? 0.006 * wind01
+      : (0.035 + badness * 0.11) * wind01 * (0.65 + forces.intensity * 0.45)
+
+  const flutterHz =
+    forces.flow === 'stalled' ? 1.55 + wind01 * 0.9 : forces.flow === 'marginal' ? 1.15 + wind01 * 0.45 : 0.55
+
+  let chordBias = 0.45
+  if (forces.trimMode === 'undertrimmed') chordBias = 0.12
+  else if (forces.trimMode === 'overtrimmed') chordBias = 0.82
+  // Soften bias when only marginally off.
+  if (forces.flow === 'marginal') chordBias = 0.35 + (chordBias - 0.35) * 0.65
+
+  return { camberScale, flutterAmp, flutterHz, chordBias, badness }
 }
 
 export function flowColor(flow: FlowQuality, intensity: number): string {
