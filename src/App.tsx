@@ -39,7 +39,7 @@ export default function App() {
           forces={forces}
           activeControl={active}
         />
-        <OutcomeOverlay activeControl={active} controls={smoothed} />
+        <OutcomeOverlay key={active ?? 'none'} activeControl={active} controls={smoothed} />
         <GoalOverlay controls={target} onApplyPatch={onApplyPatch} />
       </div>
       <ControlPanel

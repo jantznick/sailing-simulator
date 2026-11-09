@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import {
   APP_TAGLINE,
   CONTROL_META,
@@ -7,6 +8,8 @@ import {
 import { flowLabel, speedLabel, type SailForces } from '../sail/forces'
 import { formatShapeReadout } from '../sail/model'
 import type { ControlKey, SailControls, SailShape } from '../sail/types'
+import { MOBILE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { Expandable } from './Expandable'
 import { InfoTip } from './InfoTip'
 
 type Metric = MetricKey
@@ -41,46 +44,91 @@ export function ControlPanel({
   onFocus,
   onOpenLearn,
 }: ControlPanelProps) {
+  const isMobile = useMediaQuery(MOBILE_QUERY)
   const readout = formatShapeReadout(shape)
   const activeKey = active ?? 'mainsheet'
   const explainer = CONTROL_META[activeKey]
   const flowClass = `flow-pill flow-${forces.flow}`
+
+  // Mobile starts collapsed to leave room for the scene + dials.
+  const [metersOpen, setMetersOpen] = useState(false)
+  const [shapeOpen, setShapeOpen] = useState(false)
+  const [explainerOpen, setExplainerOpen] = useState(true)
+
+  const drivePct = Math.round(clamp(forces.drive, 0, 1) * 100)
+  const heelPct = Math.round(clamp(forces.heeling, 0, 1) * 100)
+  const metersSummary = (
+    <>
+      <span>Drive {drivePct}</span>
+      <span className="expandable-summary-sep" aria-hidden="true">
+        ·
+      </span>
+      <span>Heel {heelPct}</span>
+      <span className="expandable-summary-sep" aria-hidden="true">
+        ·
+      </span>
+      <span className={flowClass}>{flowLabel(forces.flow, forces.trimMode)}</span>
+    </>
+  )
+
+  const shapeSummary = (
+    <>
+      <span>{readout.draftDepth}</span>
+      <span className="expandable-summary-sep" aria-hidden="true">
+        ·
+      </span>
+      <span>{readout.twist}</span>
+      <span className="expandable-summary-sep" aria-hidden="true">
+        ·
+      </span>
+      <span>{readout.boomAngle}</span>
+    </>
+  )
 
   return (
     <aside className="control-panel">
       <div className="panel-chrome">
         <header className="panel-header">
           <div className="panel-header-row">
-            <p className="brand">Mainsail Lab</p>
+            <div className="panel-brand-block">
+              <p className="brand">Mainsail Lab</p>
+              {!isMobile ? <p className="tagline">{APP_TAGLINE}</p> : null}
+            </div>
             <button type="button" className="learn-btn" onClick={onOpenLearn}>
               How sails work
             </button>
           </div>
-          <p className="tagline">{APP_TAGLINE}</p>
+          {isMobile ? <p className="tagline tagline-mobile">{APP_TAGLINE}</p> : null}
         </header>
 
-        <section className="performance" aria-label="Boat response">
-          <div className="perf-row">
-            <Meter metric="drive" value={forces.drive} />
-            <Meter metric="heelForce" value={forces.heeling} tone="warn" />
-          </div>
-          <div className="perf-stats">
-            <Stat metric="speed" value={speedLabel(forces.speed)} />
-            <Stat metric="heel" value={`${Math.abs(forces.heelDeg).toFixed(0)}°`} />
-            <Stat metric="aoa" value={`${forces.aoaDeg.toFixed(0)}°`} />
-            <div className="perf-stat">
-              <LabelWithTip metric="flow" />
-              <span className={flowClass}>{flowLabel(forces.flow, forces.trimMode)}</span>
-            </div>
-          </div>
-        </section>
+        {isMobile ? (
+          <div className="panel-mobile-sections">
+            <Expandable
+              title="Boat response"
+              summary={metersSummary}
+              open={metersOpen}
+              onToggle={() => setMetersOpen((v) => !v)}
+              className="panel-expandable"
+            >
+              <PerformanceBlock forces={forces} flowClass={flowClass} />
+            </Expandable>
 
-        <section className="readouts" aria-label="Live sail shape">
-          <Readout metric="draftDepth" value={readout.draftDepth} />
-          <Readout metric="draftPosition" value={readout.draftPosition} />
-          <Readout metric="twist" value={readout.twist} />
-          <Readout metric="boomAngle" value={readout.boomAngle} />
-        </section>
+            <Expandable
+              title="Sail shape"
+              summary={shapeSummary}
+              open={shapeOpen}
+              onToggle={() => setShapeOpen((v) => !v)}
+              className="panel-expandable"
+            >
+              <ShapeReadouts readout={readout} />
+            </Expandable>
+          </div>
+        ) : (
+          <>
+            <PerformanceBlock forces={forces} flowClass={flowClass} />
+            <ShapeReadouts readout={readout} />
+          </>
+        )}
       </div>
 
       <section className="panel-dials" aria-label="Sail controls">
@@ -136,12 +184,69 @@ export function ControlPanel({
         })}
       </section>
 
-      <section className="panel-explainer explainer" aria-live="polite">
-        <h2>{explainer.label}</h2>
-        <p className="explainer-plain">{explainer.plain}</p>
-        <p>{explainer.blurb}</p>
-      </section>
+      {isMobile ? (
+        <div aria-live="polite">
+          <Expandable
+            title={explainer.label}
+            summary={explainer.plain}
+            open={explainerOpen}
+            onToggle={() => setExplainerOpen((v) => !v)}
+            className="panel-explainer panel-expandable"
+            bodyClassName="explainer-body"
+          >
+            <p className="explainer-plain">{explainer.plain}</p>
+            <p>{explainer.blurb}</p>
+          </Expandable>
+        </div>
+      ) : (
+        <section className="panel-explainer explainer" aria-live="polite">
+          <h2>{explainer.label}</h2>
+          <p className="explainer-plain">{explainer.plain}</p>
+          <p>{explainer.blurb}</p>
+        </section>
+      )}
     </aside>
+  )
+}
+
+function PerformanceBlock({
+  forces,
+  flowClass,
+}: {
+  forces: SailForces
+  flowClass: string
+}) {
+  return (
+    <section className="performance" aria-label="Boat response">
+      <div className="perf-row">
+        <Meter metric="drive" value={forces.drive} />
+        <Meter metric="heelForce" value={forces.heeling} tone="warn" />
+      </div>
+      <div className="perf-stats">
+        <Stat metric="speed" value={speedLabel(forces.speed)} />
+        <Stat metric="heel" value={`${Math.abs(forces.heelDeg).toFixed(0)}°`} />
+        <Stat metric="aoa" value={`${forces.aoaDeg.toFixed(0)}°`} />
+        <div className="perf-stat">
+          <LabelWithTip metric="flow" />
+          <span className={flowClass}>{flowLabel(forces.flow, forces.trimMode)}</span>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function ShapeReadouts({
+  readout,
+}: {
+  readout: ReturnType<typeof formatShapeReadout>
+}) {
+  return (
+    <section className="readouts" aria-label="Live sail shape">
+      <Readout metric="draftDepth" value={readout.draftDepth} />
+      <Readout metric="draftPosition" value={readout.draftPosition} />
+      <Readout metric="twist" value={readout.twist} />
+      <Readout metric="boomAngle" value={readout.boomAngle} />
+    </section>
   )
 }
 
